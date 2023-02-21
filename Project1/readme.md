@@ -16,3 +16,8 @@ $ python chat_client.py
 # 3. Enter user input in one of Chat Client
 # 4. Check other Chat Clients got broadcasted message(same Ip and Port should be specified)
 ```
+
+## Dependency
+- python 3.8.5
+- macOS 11.4
+
