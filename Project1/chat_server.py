@@ -12,18 +12,18 @@ class ChatServer:
 
     def init(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) # Create socket for IPv4,UDP Protocol
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)  # allow multiple socket on one port
-        self._sock.bind((self._multicast_group, self._port))  # multicast address that will receive data from multiple clients
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # allow multiple socket on one port
+        # self._sock.bind((self._multicast_group, self._port))  # multicast address that will receive data from multiple clients
+        self._sock.bind(('0.0.0.0', self._port))  # listen from any ip address, but specific port
         print("Server Initialized...")
-        print(f"Listening all sender to [ port {self._port}]")
+        print(f"CREATE CHATROOM listening [port {self._port}]")
 
     def recv_msg(self):
         data, sender = self._sock.recvfrom(2048)  # buffer size 2048 bytes
         msg_type, content = self._parse_msg(data)
 
         if msg_type == MessageType.MESSAGE:
-            # self._broadcast(sender, content)
-            print(f"{sender}, {content}")
+            self._broadcast(sender, content)
         elif msg_type == MessageType.GREETING:
             self._add_greeted_client(sender)
         else:
@@ -58,7 +58,8 @@ class ChatServer:
 
     def _broadcast(self, sender: Tuple[str, int], msg: str):
         byte_msg = self._create_broadcast_message(sender, msg)
-        self._sock.sendto(byte_msg, (self._multicast_group, self._port))
+        for client_addr in self._clients:
+            self._sock.sendto(byte_msg, client_addr)
 
 
 server = ChatServer('224.0.0.1', 9090)
