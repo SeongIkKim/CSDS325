@@ -1,19 +1,24 @@
+import argparse
 import re
 import socket
 from typing import Tuple
 
 from messages import MessageType
 
+parser = argparse.ArgumentParser(description='Chat SERVER')
+parser.add_argument('-p', '--port', help='Server listening socket port')
+
+args = parser.parse_args()
+PORT = args.port
+
 class ChatServer:
-    def __init__(self, multicast_group: str, port: int):
-        self._multicast_group = multicast_group
+    def __init__(self, port: int):
         self._port = port
         self._clients = set()  # greeted sender address list
 
     def init(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) # Create socket for IPv4,UDP Protocol
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # allow multiple socket on one port
-        # self._sock.bind((self._multicast_group, self._port))  # multicast address that will receive data from multiple clients
         self._sock.bind(('0.0.0.0', self._port))  # listen from any ip address, but specific port
         print("Server Initialized...")
         print(f"CREATE CHATROOM listening [port {self._port}]")
@@ -62,7 +67,7 @@ class ChatServer:
             self._sock.sendto(byte_msg, client_addr)
 
 
-server = ChatServer('224.0.0.1', 9090)
+server = ChatServer(int(PORT))
 server.init()
 
 while True:

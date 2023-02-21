@@ -2,9 +2,19 @@ import re
 import sys
 import select
 import socket
+import argparse
 from typing import Tuple
 
 from messages import MessageType
+
+parser = argparse.ArgumentParser(description='Chat Client')
+parser.add_argument('-ip', '--server_ip', help='Destination server ip')
+parser.add_argument('-p', '--server_port', help='Destination server port')
+
+args = parser.parse_args()
+SERVER_IP = args.server_ip
+SERVER_PORT = args.server_port
+
 
 class ChatClient:
     def __init__(self, host: str, port: int):
@@ -65,7 +75,8 @@ class ChatClient:
         message = self._create_message(MessageType.MESSAGE, msg)
         self._sock.sendto(message, (self._host, self._port))
 
-client = ChatClient('224.0.0.1', 9090)
+
+client = ChatClient(SERVER_IP, int(SERVER_PORT))
 client.init()
 client.register()
 
@@ -73,7 +84,6 @@ client_sock = client.get_socket()
 readers = [client_sock, sys.stdin]  # read socket from server incoming message, user input message
 
 while True:
-    # Get the list sockets which are readable
     read_sockets, write_sockets, error_sockets = select.select(readers, [], [])
 
     for sock in read_sockets:
