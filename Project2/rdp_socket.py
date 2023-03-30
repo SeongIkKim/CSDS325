@@ -1,3 +1,4 @@
+import random
 import struct
 from typing import Tuple
 
@@ -13,7 +14,7 @@ class RDTSocket(UnreliableSocket):
 
     window_size: int
     sent_seq_num: int  # last sent pkt sequence number. last seq num of sender window
-    rcv_expected_seq_num: int = 0  # pkt sequence number that receiver expected to receive next time.
+    rcv_expected_seq_num: int  # pkt sequence number that receiver expected to receive next time.
     out_of_order_pkts: list = []  # receiver buffer, stores out of order packets
     buffered_pkt_seq_nums: set = {} # out of order packets seq nums set
     total_data: str = '' # sum of payloads
@@ -25,6 +26,7 @@ class RDTSocket(UnreliableSocket):
     def __init__(self, window_size: int):
         super().__init__()
         self.window_size = window_size
+        self.sent_seq_num = 0
 
     def accept(self) -> Address:
         """
@@ -39,12 +41,12 @@ class RDTSocket(UnreliableSocket):
             segment = Segment.from_bytes(segment_bytes)
             if segment.header.type == PacketType.START:
                 break
-            print(f"Connection not established yet : dropped [{segment.header.type}] [{segment.data}]")
+            print(f"Connection not established yet : dropped [{segment.header.type}] [{segment.header.seq_num}] [{segment.data}]")
 
         # Got START message
         # create START_ACK message
-        self.rcv_expected_seq_num += 1
-        header = PacketHeader(PacketType.ACK, self.rcv_expected_seq_num)
+        self.rcv_expected_seq_num = 1
+        header = PacketHeader(PacketType.ACK, segment.header.seq_num)  # Set START_ACK seq_num same with START msg
         payload = ''
         packet = Segment(header, payload)
         self.sendto(packet, addr)
@@ -60,18 +62,30 @@ class RDTSocket(UnreliableSocket):
         TCP-like connect function
         invoked by "sender" to initiate connection request with the receiver
         Send START message
-
-        1.Waiting for ACK,
-        2.checking seq_num of ACK message should be the same with that of START message,
-        3.sending additional packet messages
-        Above 3 actions would be implemented in recv() method.
+        Waiting for ACK
+        Checking seq_num of ACK message should be the same with that of START message
         """
+        print(f'Try to connect with {address}...')
         self.receiver_addr = address
         # create & send connection request packet
-        header = PacketHeader(PacketType.START, seq_num=0)
+        random_seq_num = random.randint(1, 100)
+        header = PacketHeader(PacketType.START, seq_num=random_seq_num)
         packet = Segment(header)
-        self.send(packet)
-        self.sent_seq_num = 0
+        self.sendto(packet, self.receiver_addr)
+
+        while True:
+            segment_bytes, sender = self.recvfrom(SEGMENT_SIZE)
+            segment = Segment.from_bytes(segment_bytes)
+            if not verify_packet(segment):
+                # Drop and do not send ACK
+                print(f'seq_num [{segment.header.seq_num}] - Data Corrupted. Drop Packet')
+                continue
+
+            if segment.header.type == PacketType.ACK and segment.header.seq_num == random_seq_num:
+                print('Connection established.')
+                break
+            else:
+                print(f'Drop packet - packet type [{segment.header.type}], not START_ACK')
 
 
     def send(self):
@@ -85,7 +99,7 @@ class RDTSocket(UnreliableSocket):
         # TODO append a checksum to each packet
         # TODO add seq_num for each segment
         # TODO should use super().send_to()
-        pass
+
 
     def recv(self):
         """
@@ -118,13 +132,12 @@ class RDTSocket(UnreliableSocket):
             if segment.header.type == PacketType.END:
                 if segment.header.seq_num != self.rcv_expected_seq_num:
                     print(f'Drop END message packet [{segment.header.seq_num}] - Transferring packet missed. Receiving not done yet')
-                header = PacketHeader(type=PacketType.END_ACK, seq_num=self.Packet)
+                header = PacketHeader(type=PacketType.END_ACK, seq_num=segment.header.seq_num)
                 segment = Segment(header, '')
                 self.sendto(segment, self.sender_addr)
 
                 self.rcv_expected_seq_num += 1
                 self.connected = False
-                self.sender_addr = None
                 break  # The only way to break the whole loop - receiving done, connection closed
 
             # 2. data messsage
@@ -186,7 +199,7 @@ class RDTSocket(UnreliableSocket):
                 print(f'seq_num [{segment.header.seq_num}] - Data Corrupted. Drop Packet')
                 continue
 
-            if segment.header.type == PacketType.END_ACK:
+            if segment.header.type == PacketType.END_ACK and segment.header.seq_num == self.sent_seq_num:
                 print('Transferring is done. Connection closed.')
                 break
             else:
