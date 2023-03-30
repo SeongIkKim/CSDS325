@@ -6,3 +6,4 @@ class PacketType(IntEnum):
     END = 1
     DATA = 2
     ACK = 3
+    END_ACK = 4

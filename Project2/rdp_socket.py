@@ -2,7 +2,7 @@ import struct
 from typing import Tuple
 
 from Project2.messages import PacketType
-from utility import UnreliableSocket, PacketHeader, compute_checksum, byte_to_str, Segment, Address
+from utility import UnreliableSocket, PacketHeader, compute_checksum, byte_to_str, Segment, Address, verify_packet
 
 SEGMENT_SIZE = 1472  # 1500 - 8(UDP header) - 20 (IP protocol)
 DATA_SIZE = 1456  # 1472 - 16(Packet Header size)
@@ -14,7 +14,8 @@ class RDTSocket(UnreliableSocket):
     window_size: int
     sent_seq_num: int  # last sent pkt sequence number. last seq num of sender window
     rcv_expected_seq_num: int = 0  # pkt sequence number that receiver expected to receive next time.
-    rcv_buffer: list = []  # receiver buffer, stores pkts
+    out_of_order_pkts: list = []  # receiver buffer, stores out of order packets
+    buffered_pkt_seq_nums: set = {} # out of order packets seq nums set
     total_data: str = '' # sum of payloads
 
     connected: bool = False  # Is sender-receiver connection established?
@@ -73,7 +74,7 @@ class RDTSocket(UnreliableSocket):
         self.sent_seq_num = 0
 
 
-    def send(self, data):
+    def send(self):
         """
         invoked by sender to transmit data to the receiver
         1. split input data into appropriately sized chunks of data
@@ -93,32 +94,75 @@ class RDTSocket(UnreliableSocket):
         2. check integrity of the segments by verify_packet() function in utility.py
             - If calculated checksum does not match with header checksum, then drop packet(do not send ACK)
         3. pass the message back to the application process
-        Drop all packets which seq_num >= _EXPECTED_SEQ_NUM + _WINDOW_SIZE to maintain window size window.
+        Drop all packets which seq_num >= EXPECTED_SEQ_NUM + WINDOW_SIZE to maintain window size window.
         :return:
         """
-        # TODO should use super().recv_from()
         # TODO got ACK so move forward window and reset timeout timer
-        packet, sender = self.recvfrom(4096)
-        header_bytes, data_bytes = packet[:16], packet[16:]
-        values = struct.unpack('4I', header_bytes)
-        header = PacketHeader(*values)
-
-        if header.checksum != compute_checksum(data_bytes):
-            print('Data Corrupted')
-            # do not send ACK
+        if not self.connected or not self.sender_addr:
+            print('Connection is not established properly yet. Cannot receive data')
             return
 
-        # Received correct packet
-        # TODO segment assemble and check order
-        self.rcv_seq_num = max(self.rcv_seq_num, header.seq_num)
+        # Receive all segments and assemble
 
-        data = byte_to_str(data_bytes)
-        print(data)
+        while True:
+            segment_bytes, sender = self.recvfrom(SEGMENT_SIZE)
+            segment = Segment.from_bytes(segment_bytes)
+            if not verify_packet(segment):
+                # Drop and do not send ACK
+                print(f'seq_num [{segment.header.seq_num}] - Data Corrupted. Drop Packet')
+                continue
 
-        # send ACK to sender
-        self._create_segment(PacketType.ACK, seq_num=self.rcv_seq_num + 1, header.seq_num)
+            # Received uncorrupted packet
 
-        return
+            # 1. connection end message
+            if segment.header.type == PacketType.END:
+                if segment.header.seq_num != self.rcv_expected_seq_num:
+                    print(f'Drop END message packet [{segment.header.seq_num}] - Transferring packet missed. Receiving not done yet')
+                header = PacketHeader(type=PacketType.END_ACK, seq_num=self.Packet)
+                segment = Segment(header, '')
+                self.sendto(segment, self.sender_addr)
+
+                self.rcv_expected_seq_num += 1
+                self.connected = False
+                self.sender_addr = None
+                break  # The only way to break the whole loop - receiving done, connection closed
+
+            # 2. data messsage
+            elif segment.header.type == PacketType.DATA:
+                # out of order packet
+                if self.rcv_expected_seq_num != segment.header.seq_num:
+                    if segment.header.seq_num >= self.rcv_expected_seq_num + self.window_size: # over window size
+                        print(f'Dropped packet [{segment.header.seq_num}] over window [{self.rcv_expected_seq_num} ~ {self.rcv_expected_seq_num + self.window_size}]')
+                        continue
+                    elif segment.header.seq_num in self.buffered_pkt_seq_nums:
+                        print(f'Dropped packet [{segment.header.seq_num}] already buffered')
+                        continue
+                    else: # in window size and newly received
+                        self.out_of_order_pkts.append(segment)
+                        self.buffered_pkt_seq_nums.add(segment.header.seq_num)
+                        header = PacketHeader(type=PacketType.ACK, seq_num=self.rcv_expected_seq_num) # send duplicated ACK
+                        segment = Segment(header, '')
+                        self.sendto(segment, self.sender_addr)
+                # correct order packet
+                else:
+                    self.total_data += segment.data # assemble
+                    self.rcv_expected_seq_num += 1
+                    self.out_of_order_pkts.sort(key=lambda segment: segment.header.seq_num)
+
+                    while self.out_of_order_pkts:
+                        # there is another missing pkt in out of order packets
+                        if self.out_of_order_pkts[0].header.seq_num != self.rcv_expected_seq_num:
+                            break
+
+                        pkt = self.out_of_order_pkts.pop()  # next packet
+                        self.total_data += pkt.data
+                        self.rcv_expected_seq_num += 1
+
+                    header = PacketHeader(type=PacketType.ACK, seq_num=self.rcv_expected_seq_num)
+                    segment = Segment(header, '')
+                    self.sendto(segment, self.sender_addr)
+
+        return self.total_data
 
     def close(self):
         """
@@ -128,5 +172,22 @@ class RDTSocket(UnreliableSocket):
         After all, connection is closed.
         :return:
         """
-        pass
+        # create & send connection request packet
+        header = PacketHeader(PacketType.END, seq_num=self.sent_seq_num + 1)
+        end_msg = Segment(header, '')
+        self.sendto(end_msg, self.receiver_addr)
+        self.sent_seq_num += 1
 
+        while True:
+            segment_bytes, sender = self.recvfrom(SEGMENT_SIZE)
+            segment = Segment.from_bytes(segment_bytes)
+            if not verify_packet(segment):
+                # Drop and do not send ACK
+                print(f'seq_num [{segment.header.seq_num}] - Data Corrupted. Drop Packet')
+                continue
+
+            if segment.header.type == PacketType.END_ACK:
+                print('Transferring is done. Connection closed.')
+                break
+            else:
+                print(f'Drop packet - packet type [{segment.header.type}], not END_ACK')
