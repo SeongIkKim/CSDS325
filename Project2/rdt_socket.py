@@ -2,7 +2,7 @@ import random
 import time
 from typing import Tuple
 
-from Project2.messages import PacketType
+from messages import PacketType
 from utility import UnreliableSocket, PacketHeader, byte_to_str, Segment, Address, verify_packet, str_to_byte
 
 SEGMENT_SIZE = 1472  # 1500 - 8(UDP header) - 20 (IP protocol)
@@ -17,7 +17,7 @@ class RDTSocket(UnreliableSocket):
     sent_seq_num: int  # last sent pkt sequence number. last seq num of sender window
     rcv_expected_seq_num: int  # pkt sequence number that receiver expected to receive next time.
     out_of_order_pkts: list = []  # receiver buffer, stores out of order packets
-    buffered_pkt_seq_nums: set = {} # out of order packets seq nums set
+    buffered_pkt_seq_nums: set = set() # out of order packets seq nums set
     total_data_bytes: bytes = b'' # sum of payloads
     total_data: str = ''
 
@@ -27,10 +27,10 @@ class RDTSocket(UnreliableSocket):
 
     def __init__(self, window_size: int):
         super().__init__()
-        self.settimeout(self.timer) # socket timer setup. Later check again for case that did not get ACK message
+        # self.settimeout(self.timer) # socket timer setup. Later check again for case that did not get ACK message
         self.sent_seq_num = -1
         self.window_size = window_size
-        self.window_boundary = (0, window_size)
+        self.window_boundary = (0, self.window_size)
 
     def accept(self) -> Address:
         """
@@ -53,10 +53,8 @@ class RDTSocket(UnreliableSocket):
         header = PacketHeader(PacketType.ACK, segment.header.seq_num)  # Set START_ACK seq_num same with START msg
         payload = ''
         packet = Segment(header, payload)
-        self.sendto(packet, addr)
+        self.sendto(packet.to_bytes(), addr)
         print('Sent START_ACK message to sender - connection established')
-
-        # TODO TIMEOUT CHECK
 
         self.connected = True
         return addr
@@ -73,12 +71,12 @@ class RDTSocket(UnreliableSocket):
         self.receiver_addr = address
         # create & send connection request packet
         random_seq_num = random.randint(1, 100)
-        header = PacketHeader(PacketType.START, seq_num=random_seq_num)
-        packet = Segment(header)
-        self.sendto(packet, self.receiver_addr)
+        header = PacketHeader(type=PacketType.START, seq_num=random_seq_num)
+        packet = Segment(header, '')
+        self.sendto(packet.to_bytes(), self.receiver_addr)
 
         while True:
-            segment_bytes, sender = self.recvfrom(SEGMENT_SIZE)
+            segment_bytes, sender_addr = self.recvfrom(SEGMENT_SIZE)
             segment = Segment.from_bytes(segment_bytes)
             if not verify_packet(segment):
                 # Drop and do not send ACK
@@ -87,6 +85,8 @@ class RDTSocket(UnreliableSocket):
 
             if segment.header.type == PacketType.ACK and segment.header.seq_num == random_seq_num:
                 print('Connection established.')
+                self.connected = True
+                self.sender_addr = sender_addr
                 break
             else:
                 print(f'Drop packet - packet type [{segment.header.type}], not START_ACK')
@@ -107,25 +107,26 @@ class RDTSocket(UnreliableSocket):
 
         # split whole data to chunks
         chunks = []
+        segment_count = 0
         for i in range(0, len(data_bytes), DATA_SIZE):
-            header = PacketHeader(type=PacketType.DATA, seq_num=i+1)
+            segment_count += 1
+            header = PacketHeader(type=PacketType.DATA, seq_num=segment_count)
             data = byte_to_str(data_bytes[i:i + DATA_SIZE])
             segment = Segment(header, data)
             chunks.append(segment)
-
-        last_ack_num = 0
+        last_ack_num = 1
 
         # send chunks in order
         while last_ack_num <= chunks[-1].header.seq_num:
-            window = chunks[self.window_boundary[0] : self.window_boundary[2]]
+            window = chunks[self.window_boundary[0] : self.window_boundary[1]]
             for chunk in window:
-                self.sendto(chunk, self.receiver_addr)
+                self.sendto(chunk.to_bytes(), self.receiver_addr)
                 self.sent_seq_num += 1
                 print(f'Sent chunk seq_num [{chunk.header.seq_num}]')
 
             last_ack_time = time.time()
             window_ack_count = 0
-            while window_ack_count < self.window_size:
+            while window_ack_count < self.window_size and len(chunks) > self.window_boundary[0]:
                 if time.time() - last_ack_time > self.timer:
                     print('Timeout error')
                     # break and go to outer while loop(send whole unacknowledged window packets again)
@@ -139,11 +140,10 @@ class RDTSocket(UnreliableSocket):
 
                 # Right next ack received 0 - window moves forward
                 if segment.header.seq_num == last_ack_num + 1:
-                    print(f'Received ACK [{segment.header.seq_num}] - window moves forward [({self.window_boundary[0]}~{self.window_boundary[1]})]')
                     last_ack_time = time.time()  # so update timer
                     last_ack_num += 1
-                    self.window_boundary[0] += 1
-                    self.window_boundary[1] += 1
+                    self.window_boundary = (self.window_boundary[0]+1, self.window_boundary[1]+1)
+                    print(f'Received ACK [{segment.header.seq_num}] - window moves forward [({self.window_boundary[0]}~{self.window_boundary[1]})]')
                     window_ack_count += 1
                 else:
                     print(f'Drop ACK packet - expected[{last_ack_num + 1}], but got [{segment.header.seq_num}]')
@@ -161,7 +161,6 @@ class RDTSocket(UnreliableSocket):
         Drop all packets which seq_num >= EXPECTED_SEQ_NUM + WINDOW_SIZE to maintain window size window.
         :return:
         """
-        # TODO got ACK so move forward window and reset timeout timer
         if not self.connected or not self.sender_addr:
             print('Connection is not established properly yet. Cannot receive data')
             return
@@ -184,10 +183,11 @@ class RDTSocket(UnreliableSocket):
                     print(f'Drop END message packet [{segment.header.seq_num}] - Transferring packet missed. Receiving not done yet')
                 header = PacketHeader(type=PacketType.END_ACK, seq_num=segment.header.seq_num)
                 segment = Segment(header, '')
-                self.sendto(segment, self.sender_addr)
+                self.sendto(segment.to_bytes(), self.sender_addr)
 
                 self.rcv_expected_seq_num += 1
                 self.connected = False
+                print('Transmission done - connection closed')
                 break  # The only way to break the whole loop - receiving done, connection closed
 
             # 2. data messsage
@@ -201,14 +201,16 @@ class RDTSocket(UnreliableSocket):
                         print(f'Dropped packet [{segment.header.seq_num}] already buffered')
                         continue
                     else: # in window size and newly received
+                        print(f'New out of order packet buffered - seq_num [{segment.header.seq_num}]')
                         self.out_of_order_pkts.append(segment)
                         self.buffered_pkt_seq_nums.add(segment.header.seq_num)
                         header = PacketHeader(type=PacketType.ACK, seq_num=self.rcv_expected_seq_num) # send duplicated ACK
                         segment = Segment(header, '')
-                        self.sendto(segment, self.sender_addr)
+                        self.sendto(segment.to_bytes(), self.sender_addr)
+                        print(f'Sent ACK{self.rcv_expected_seq_num} - missing data request')
                 # correct order packet
                 else:
-                    self.total_data_bytes += bytes(segment.data) # assemble
+                    self.total_data_bytes += segment.data.encode() # assemble
                     self.rcv_expected_seq_num += 1
                     self.out_of_order_pkts.sort(key=lambda segment: segment.header.seq_num)
 
@@ -223,7 +225,8 @@ class RDTSocket(UnreliableSocket):
 
                     header = PacketHeader(type=PacketType.ACK, seq_num=self.rcv_expected_seq_num)
                     segment = Segment(header, '')
-                    self.sendto(segment, self.sender_addr)
+                    self.sendto(segment.to_bytes(), self.sender_addr)
+                    print(f'Sent ACK [{segment.header.seq_num}] - missing data found, not normalized')
 
         self.total_data = byte_to_str(self.total_data_bytes)
         return self.total_data
@@ -239,7 +242,7 @@ class RDTSocket(UnreliableSocket):
         # create & send connection request packet
         header = PacketHeader(PacketType.END, seq_num=self.sent_seq_num + 1)
         end_msg = Segment(header, '')
-        self.sendto(end_msg, self.receiver_addr)
+        self.sendto(end_msg.to_bytes(), self.receiver_addr)
         self.sent_seq_num += 1
 
         while True:

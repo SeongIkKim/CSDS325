@@ -1,14 +1,10 @@
-import errno
-import os
-import signal
 import struct
 from dataclasses import dataclass
 import socket
-from functools import wraps
 from typing import Tuple, Any, Optional
 import zlib
 
-from Project2.messages import PacketType
+from messages import PacketType
 
 
 class UnreliableSocket(socket.socket):
@@ -30,7 +26,7 @@ class UnreliableSocket(socket.socket):
         :param flags: flags
         :return: datagram and return address
         """
-        return super().recvfrom(bufsize, flags)
+        return super().recvfrom(bufsize)
 
     def sendto(self, data, address):
         """
@@ -38,6 +34,8 @@ class UnreliableSocket(socket.socket):
         :param data: readable buffer data
         :param address: (host, port)
         """
+        if isinstance(address, Address):
+            address = (address.ip, address.port)
         return super().sendto(data, address)
 
     def close(self) -> None:
@@ -73,14 +71,14 @@ class Segment:
         """
         bin_data = str_to_byte(payload)
         self.header = header
-        self.header.length = len(bin_data),
+        self.header.length = len(bin_data)
         self.header.checksum = compute_checksum(bin_data)
         self.data = payload
 
     def to_bytes(self) -> bytes:
         header_bytes = struct.pack(
             '4I',
-            self.header.type,
+            int(self.header.type),
             self.header.seq_num,
             self.header.checksum,
             self.header.length
