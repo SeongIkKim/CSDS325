@@ -1,9 +1,9 @@
 import random
-import struct
+import time
 from typing import Tuple
 
 from Project2.messages import PacketType
-from utility import UnreliableSocket, PacketHeader, compute_checksum, byte_to_str, Segment, Address, verify_packet
+from utility import UnreliableSocket, PacketHeader, byte_to_str, Segment, Address, verify_packet, str_to_byte
 
 SEGMENT_SIZE = 1472  # 1500 - 8(UDP header) - 20 (IP protocol)
 DATA_SIZE = 1456  # 1472 - 16(Packet Header size)
@@ -13,11 +13,13 @@ class RDTSocket(UnreliableSocket):
     sender_addr: Address  # ip, port
 
     window_size: int
+    window_boundary: Tuple[int, int]  # window boundary - (start, end + 1)
     sent_seq_num: int  # last sent pkt sequence number. last seq num of sender window
     rcv_expected_seq_num: int  # pkt sequence number that receiver expected to receive next time.
     out_of_order_pkts: list = []  # receiver buffer, stores out of order packets
     buffered_pkt_seq_nums: set = {} # out of order packets seq nums set
-    total_data: str = '' # sum of payloads
+    total_data_bytes: bytes = b'' # sum of payloads
+    total_data: str = ''
 
     connected: bool = False  # Is sender-receiver connection established?
 
@@ -25,8 +27,10 @@ class RDTSocket(UnreliableSocket):
 
     def __init__(self, window_size: int):
         super().__init__()
+        self.settimeout(self.timer) # socket timer setup. Later check again for case that did not get ACK message
+        self.sent_seq_num = -1
         self.window_size = window_size
-        self.sent_seq_num = 0
+        self.window_boundary = (0, window_size)
 
     def accept(self) -> Address:
         """
@@ -88,17 +92,63 @@ class RDTSocket(UnreliableSocket):
                 print(f'Drop packet - packet type [{segment.header.type}], not START_ACK')
 
 
-    def send(self):
+    def send(self, data: str):
         """
         invoked by sender to transmit data to the receiver
         1. split input data into appropriately sized chunks of data
         2. append a checksum(calculated by 'compute_checksum()' in utility.py) to each packet
         3. seq_num should increment by one for each additional segment in a connection.
         """
-        # TODO split input data into appropriate sized chunks
-        # TODO append a checksum to each packet
-        # TODO add seq_num for each segment
-        # TODO should use super().send_to()
+        if not self.connected or not self.receiver_addr:
+            print('Connection not established yet.')
+            return
+
+        data_bytes = str_to_byte(data)
+
+        # split whole data to chunks
+        chunks = []
+        for i in range(0, len(data_bytes), DATA_SIZE):
+            header = PacketHeader(type=PacketType.DATA, seq_num=i+1)
+            data = byte_to_str(data_bytes[i:i + DATA_SIZE])
+            segment = Segment(header, data)
+            chunks.append(segment)
+
+        last_ack_num = 0
+
+        # send chunks in order
+        while last_ack_num <= chunks[-1].header.seq_num:
+            window = chunks[self.window_boundary[0] : self.window_boundary[2]]
+            for chunk in window:
+                self.sendto(chunk, self.receiver_addr)
+                self.sent_seq_num += 1
+                print(f'Sent chunk seq_num [{chunk.header.seq_num}]')
+
+            last_ack_time = time.time()
+            window_ack_count = 0
+            while window_ack_count < self.window_size:
+                if time.time() - last_ack_time > self.timer:
+                    print('Timeout error')
+                    # break and go to outer while loop(send whole unacknowledged window packets again)
+                    break
+                segment_bytes, sender = self.recvfrom(SEGMENT_SIZE)
+                segment = Segment.from_bytes(segment_bytes)
+
+                if segment.header.type != PacketType.ACK:
+                    print('Drop packet - Not ACK type')
+                    continue
+
+                # Right next ack received 0 - window moves forward
+                if segment.header.seq_num == last_ack_num + 1:
+                    print(f'Received ACK [{segment.header.seq_num}] - window moves forward [({self.window_boundary[0]}~{self.window_boundary[1]})]')
+                    last_ack_time = time.time()  # so update timer
+                    last_ack_num += 1
+                    self.window_boundary[0] += 1
+                    self.window_boundary[1] += 1
+                    window_ack_count += 1
+                else:
+                    print(f'Drop ACK packet - expected[{last_ack_num + 1}], but got [{segment.header.seq_num}]')
+
+        print('Transmitting data done')
 
 
     def recv(self):
@@ -158,7 +208,7 @@ class RDTSocket(UnreliableSocket):
                         self.sendto(segment, self.sender_addr)
                 # correct order packet
                 else:
-                    self.total_data += segment.data # assemble
+                    self.total_data_bytes += bytes(segment.data) # assemble
                     self.rcv_expected_seq_num += 1
                     self.out_of_order_pkts.sort(key=lambda segment: segment.header.seq_num)
 
@@ -168,13 +218,14 @@ class RDTSocket(UnreliableSocket):
                             break
 
                         pkt = self.out_of_order_pkts.pop()  # next packet
-                        self.total_data += pkt.data
+                        self.total_data_bytes += bytes(pkt.data)
                         self.rcv_expected_seq_num += 1
 
                     header = PacketHeader(type=PacketType.ACK, seq_num=self.rcv_expected_seq_num)
                     segment = Segment(header, '')
                     self.sendto(segment, self.sender_addr)
 
+        self.total_data = byte_to_str(self.total_data_bytes)
         return self.total_data
 
     def close(self):
@@ -200,7 +251,8 @@ class RDTSocket(UnreliableSocket):
                 continue
 
             if segment.header.type == PacketType.END_ACK and segment.header.seq_num == self.sent_seq_num:
-                print('Transferring is done. Connection closed.')
                 break
             else:
                 print(f'Drop packet - packet type [{segment.header.type}], not END_ACK')
+
+        print('Transmitting is done. Connection closed.')
