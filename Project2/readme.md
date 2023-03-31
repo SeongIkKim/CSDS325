@@ -1,5 +1,7 @@
 # Project 2 - Reliable Data Transfer
 
+- python 3.8.13
+
 ## how to use
 
 ```bash
