@@ -30,9 +30,6 @@ class UnreliableSocket(socket.socket):
         :param flags: flags
         :return: datagram and return address
         """
-        # TODO simulate packet loss
-        # TODO simulate packet delay
-        # TODO simulate packet corruption
         return super().recvfrom(bufsize, flags)
 
     def sendto(self, data, address):
