@@ -12,23 +12,27 @@ from messages import MessageType
 parser = argparse.ArgumentParser(description='Network Node Client')
 parser.add_argument('-ip', '--server_ip', help='Remote server ip')
 parser.add_argument('-p', '--server_port', help='Remote server port')
+parser.add_argument('-n', '--node_name', help='u,v,w,x,y,z')
 
 args = parser.parse_args()
 SERVER_IP = args.server_ip
 SERVER_PORT = args.server_port
+NODE_NAME = args.node_name
 
 
 class NodeClient:
     def __init__(self, host: str, port: int):
         self._host = host
         self._port = port
-        self._node_name = None
+        self._node_name = NODE_NAME
         self._neighbors = None
         self._vector = {"u": math.inf, "w": math.inf, "v": math.inf, "x": math.inf, "y": math.inf, "z": math.inf}
 
+        self.updating = True  # True while updating process
+
     def init(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)  # Create socket for IPv4,UDP Protocol
-        self._sock.setblocking(False)  # use asynchronous, nonblocking socket to use select
+        self._sock.settimeout(30) # timeout if new message does not come 30 sec
         print(f"CREATE CLIENT [host {self._host} : port {self._port}]")
 
     def get_socket(self):
@@ -39,33 +43,43 @@ class NodeClient:
         Get multicasted message from client socket and print it
         :return:
         """
-        data, sender = self._sock.recvfrom(1476)
+        try:
+            data, sender = self._sock.recvfrom(1476)
+        except socket.timeout:
+            self.updating = False
+            print("Updating is done. Connection closed.")
+            return
+
         msg_type, content = self._parse_msg(data)
 
-        if msg_type == MessageType.ACCEPT:
-            distance_info = json.loads(content)
-            self._initialize_vector(distance_info)
-        elif msg_type == MessageType.UPDATE:
+        if int(msg_type) == MessageType.UPDATE:
             vector_info = json.loads(content)
             original_vector = self._vector.copy()
             self._update_vector(vector_info)
             if not self._vector == original_vector:
                 self._broadcast_request()
+        elif int(msg_type) == MessageType.ACCEPT:  # this node joined in network
+            distance_info = json.loads(content)
+            self._initialize_vector(distance_info)
+        elif int(msg_type) == MessageType.ESTABLISHED:  # All other nodes are in network now
+            self._broadcast_request()
         else:
             pass
 
     def _initialize_vector(self, distance_info):
-        self._node_name = distance_info.keys()[0]
         self._neighbors = distance_info[self._node_name]
         self._vector[self._node_name] = 0
         for neighbor, distance in self._neighbors.items():
-            self._vector[neighbor] = distance
+            if distance > 0:
+                self._vector[neighbor] = distance
+            else: # not directly connected
+                self._vector[neighbor] = math.inf
         print(f"{self._node_name} - {self._vector}")
 
     def _update_vector(self, vector_info):
-        update_request_node = vector_info.keys()[0]
+        update_request_node = next(iter(vector_info))
         updated_vector = vector_info[update_request_node]
-        print(f"Update request from [{updated_vector}] - {updated_vector}")
+        print(f"Update request from [{update_request_node}] - {updated_vector}")
         for v, cost in self._vector.items():
             self._vector[v] = min(self._vector[update_request_node] + updated_vector[v], self._vector[v])
         print(f"Updated distance vector in {self._node_name} \n {self._vector}")
@@ -98,7 +112,7 @@ class NodeClient:
         return byte_msg
 
     def register(self):
-        message = self._create_message(MessageType.JOIN, "JOIN")
+        message = self._create_message(MessageType.JOIN, msg=self._node_name)
         self._sock.sendto(message, (self._host, self._port))
 
     def _send_msg(self, msg: str):
@@ -114,5 +128,5 @@ client = NodeClient(SERVER_IP, int(SERVER_PORT))
 client.init()
 client.register()
 
-while True:
+while client.updating:
     client.recv_msg()
