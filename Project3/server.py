@@ -17,11 +17,12 @@ class Server:
         self._port = port
         self._addr_to_client = {} # addr -> node name
         self._clients = {
-            "u": {"neighbors": {"x": 5, "w": 3, "v": 7}},
-            "w": {"neighbors": {"u": 3, "x": 4, "v": 3, "y": 8}},
-            "x": {"neighbors": {"u": 5, "w": 4, "y": 7, "z": 9}},
-            "v": {"neighbors": {"u": 7, "w": 3, "y": 4}},
-            "y": {"neighbors": {"x": 7, "w": 8, "v": 4, "z": 2}}
+            "u": {"neighbors": {"x": 5, "w": 3, "v": 7, "y": -1, "z": -1}},
+            "w": {"neighbors": {"u": 3, "x": 4, "v": 3, "y": 8, "z": -1}},
+            "x": {"neighbors": {"u": 5, "w": 4, "v": -1, "y": 7, "z": 9}},
+            "v": {"neighbors": {"u": 7, "x": -1, "w": 3, "v": -1, "y": 4}},
+            "y": {"neighbors": {"u": -1, "x": 7, "w": 8, "v": 4, "z": 2}},
+            "z": {"neighbors": {"u": -1, "x": 9, "w": -1, "v": -1, "y": 2}}
         }
 
         for node_name, _ in self._clients:
@@ -41,11 +42,12 @@ class Server:
 
         if msg_type == MessageType.JOIN:
             self._join(sender)
-            distance_info = self._get_initial_distance_info(sender)
+            node_name = self._addr_to_client[sender]
+            distance_info = self._get_initial_distance_info(node_name)
             byte_msg = self._create_byte_message(MessageType.ACCEPT, json.dumps(distance_info))
             self._sock.sendto(byte_msg, sender)
         elif msg_type == MessageType.UPDATE:
-            self._broadcast_updated_distance_info(sender, content)
+            self._broadcast_updated_vector(sender, content)
         else:
             pass  # do not handle exception case
 
@@ -57,7 +59,7 @@ class Server:
         """
         # Add sender to network as client node
         join_complete = False
-        for node_name, val in self._clients:
+        for node_name, val in self._clients.items():
             if not val['ip']:
                 val['ip'], val['port'] = sender
                 self._addr_to_client[sender] = node_name
@@ -78,10 +80,9 @@ class Server:
         msg_type, content = match.group(1), match.group(2)
         return msg_type, content
 
-    def _get_initial_distance_info(self, sender: Tuple[str, int]) -> Dict[str, int]:
-        node_name = self._addr_to_client[sender]
+    def _get_initial_distance_info(self, node_name: str) -> Dict[str, int]:
         neighbors = self._clients[node_name]["neighbors"]
-        return neighbors
+        return {node_name: neighbors}
 
     def _create_byte_message(self, msg_type: MessageType, msg: str):
         """
@@ -94,11 +95,13 @@ class Server:
         byte_msg = data.encode()
         return byte_msg
 
-    def _broadcast_updated_distance_info(self, sender: Tuple[str, int], msg: str):
+    def _broadcast_updated_vector(self, sender: Tuple[str, int], msg: str):
         byte_msg = self._create_byte_message(MessageType.UPDATE, msg)
         node_name = self._addr_to_client[sender]
         neighbors = self._clients[node_name]['neighbors']
-        for neighbor, _ in neighbors:
+        for neighbor, distance in neighbors.items():
+            if distance < 0:  # not directly connected
+                continue
             neighbor_addr = (self._clients[neighbor]['ip'], self._clients[neighbor]['port'])
             self._sock.sendto(byte_msg, neighbor_addr)
 
